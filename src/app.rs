@@ -51,7 +51,7 @@ impl Simulation {
 
     /// Genera un insieme di particelle casuali all’interno dello schermo
     fn generate_points(&mut self, width: f32, height: f32) {
-        self.num_types = 2;
+        self.num_types = 5;
         use rand::Rng;
         let mut rng = rand::rng();
         self.points = (0..self.num_points)
@@ -79,6 +79,10 @@ impl Simulation {
 
     /// Aggiorna la fisica della simulazione (repulsione tra particelle)
     fn update_physics(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_time).as_secs_f32();
+        self.last_time = now;
+
         let len = self.num_points;
         for _i in 0..len {
             let p1 = self.points[_i];
@@ -87,20 +91,18 @@ impl Simulation {
 
                 let p2 = self.points[_j];
                 let d = egui::Vec2::new(p2.position.x - p1.position.x, p2.position.y - p1.position.y);
-                let dist = d.length().max(0.01);
-                if dist > 10.0 {continue;}
-                let f = Simulation::force(dist / 10.0, self.matrix[p1.color][p2.color]);
+                let dist = d.length().max(0.00001);
+                if dist > 30.0 {continue;}
+                let f = Simulation::force(dist / 30.0, self.matrix[p1.color][p2.color]);
                 
                 let unit_d = Vec2::new(d.x / dist, d.y / dist);
 
                 sum.x += unit_d.x * f;
                 sum.y += unit_d.y * f;
             }
-            sum.x *= 10.0;
-            sum.y *= 10.0;
+            sum *= 30.0;
 
-            let now = std::time::Instant::now();
-            let dt = now.duration_since(self.last_time).as_secs_f32();
+
             let p = &mut self.points[_i];
             p.velocity = p.velocity + sum * dt;
             p.position += p.velocity * dt;
@@ -150,7 +152,6 @@ impl eframe::App for Simulation {
                 // FPS
                 let now = std::time::Instant::now();
                 let dt = now.duration_since(self.last_time).as_secs_f32();
-                self.last_time = now;
                 if dt > 0.0 {
                     self.fps = 1.0 / dt;
                 }
