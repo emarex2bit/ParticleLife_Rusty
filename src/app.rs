@@ -16,6 +16,7 @@ pub struct Simulation {
     #[serde(skip)]
     fps: f32,
     matrix: Vec<Vec<f32>>,
+    radius: f32
 
 }
 
@@ -23,7 +24,7 @@ pub struct Simulation {
 struct Particle {
     position: Pos2,
     velocity: Vec2,
-    color: usize
+    color: usize,
 }
 
 impl Default for Simulation {
@@ -35,7 +36,8 @@ impl Default for Simulation {
             points: Vec::new(),
             last_time: std::time::Instant::now(),
             fps: 0.0,
-            matrix: Vec::new()
+            matrix: Vec::new(),
+            radius: 50.0
         }
     }
 }
@@ -51,13 +53,13 @@ impl Simulation {
 
     /// Genera un insieme di particelle casuali all’interno dello schermo
     fn generate_points(&mut self, width: f32, height: f32) {
-        self.num_types = 5;
         use rand::Rng;
         let mut rng = rand::rng();
         self.points = (0..self.num_points)
             .map(|_| Particle {
                 position: Pos2::new(rng.random_range(0.0..width), rng.random_range(0.0..height)),
                 velocity: Vec2::new(0.0, 0.0),
+
                 color: rng.random_range(0..self.num_types)
             })
             .collect();
@@ -90,21 +92,20 @@ impl Simulation {
             for _j in 0..len{
 
                 let p2 = self.points[_j];
-                let d = egui::Vec2::new(p2.position.x - p1.position.x, p2.position.y - p1.position.y);
-                let dist = d.length().max(0.00001);
-                if dist > 30.0 {continue;}
-                let f = Simulation::force(dist / 30.0, self.matrix[p1.color][p2.color]);
+                let d = p2.position - p1.position;
+                let dist = d.length().max(0.0000001);
+                if dist > self.radius {continue;}
+                let f = Simulation::force(dist / self.radius, self.matrix[p1.color][p2.color]);
                 
-                let unit_d = Vec2::new(d.x / dist, d.y / dist);
+                let unit_d = d / dist;
 
-                sum.x += unit_d.x * f;
-                sum.y += unit_d.y * f;
+                sum += unit_d * f;
             }
-            sum *= 30.0;
+            sum *= self.radius;
 
 
             let p = &mut self.points[_i];
-            p.velocity = p.velocity + sum * dt;
+            p.velocity = 0.5_f32.powf(dt / 0.05) * p.velocity + sum * dt;
             p.position += p.velocity * dt;
         }
     }
@@ -144,9 +145,57 @@ impl eframe::App for Simulation {
                 {
                     self.generate_points(width, height);
                 }
-
+                ui.label("Raggio:");
+                ui.add(egui::Slider::new(&mut self.radius, 1.0..=500.0));
+                ui.label("Num. Types:");
+                if ui.add(egui::Slider::new(&mut self.num_types, 1..=50)).changed() {
+                    self.generate_points(width, height);
+                }
                 if ui.button("Rigenera").clicked() {
                     self.generate_points(width, height);
+                }
+
+                if self.matrix.is_empty() {
+                    ui.label("Genera prima le particelle per creare la matrice.");
+                    return;
+                }
+                ui.heading("Matrice Legami");
+                ui.label("Clicca e modifica i valori dei legami tra tipi di particelle:");
+                ui.separator();
+
+                egui::Grid::new("matrix_editor_grid")
+                    .spacing([8.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Intestazioni colonne
+                        ui.label("");
+                        for j in 0..self.num_types {
+                            ui.label(format!("T{}", j));
+                        }
+                        ui.end_row();
+
+                        // Righe
+                        for i in 0..self.num_types {
+                            ui.label(format!("T{}", i)); // intestazione riga
+                            for j in 0..self.num_types {
+                                ui.add(
+                                    egui::DragValue::new(&mut self.matrix[i][j])
+                                        .speed(0.01)
+                                        .clamp_range(-1.0..=1.0)
+                                );
+                            }
+                            ui.end_row();
+                        }
+                    });
+
+                if ui.button("Randomizza legami").clicked() {
+                    use rand::Rng;
+                    let mut rng = rand::rng();
+                    for i in 0..self.num_types {
+                        for j in 0..self.num_types {
+                            self.matrix[i][j] = rng.random_range(-1.0..1.0);
+                        }
+                    }
                 }
 
                 // FPS
@@ -168,9 +217,12 @@ impl eframe::App for Simulation {
         egui::CentralPanel::default().show(ctx, |ui| {
             let painter = ui.painter();
             for p in &self.points {
+                //painter.circle_filled(p.position, 10.0, egui::Color32::from_rgb(255, 255, 255));
                 painter.circle_filled(p.position, 3.0, self.colors[p.color]);
+                
             }
         });
+
 
         // Richiedi un nuovo frame continuo
         ctx.request_repaint();
