@@ -76,8 +76,6 @@ impl Simulation {
         for _i in 0..self.num_types {
             self.colors.push(egui::Color32::from_rgb(rng.random_range(0..255), rng.random_range(0..255), rng.random_range(0..255)));
         }
-        println!("{}", self.num_types);
-        println!("{}", self.colors.len());
 
         self.matrix = (0..self.num_types)
         .map(|_| {
@@ -321,6 +319,8 @@ impl eframe::App for Simulation {
             let max_y = self.height / self.zoom * (self.zoom - 1.0);
             let width = max_x - min_x;
             let height = max_y - min_y;
+
+            
         
             for p in &self.points {
                 let base = p.position;
