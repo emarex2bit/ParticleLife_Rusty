@@ -95,123 +95,108 @@ impl Simulation {
     
         let len = self.num_points;
     
-        // Bordo toroidale
+        // --- Bordo toroidale ---
         let min_x: f32 = self.width / self.zoom;
         let max_x: f32 = self.width / self.zoom * (self.zoom - 1.0);
         let min_y: f32 = self.height / self.zoom;
         let max_y: f32 = self.height / self.zoom * (self.zoom - 1.0);
-
+    
         let width = max_x - min_x;
         let height = max_y - min_y;
-
-        /*let num_cells_x = 10;
-        let num_cells_y = 10;
+    
+        // --- Griglia proporzionata al raggio ---
+        let num_cells_x = (width / self.radius).ceil() as usize;
+        let num_cells_y = (height / self.radius).ceil() as usize;
         let cell_width = width / num_cells_x as f32;
         let cell_height = height / num_cells_y as f32;
-
-        let mut grid: Vec<Vec<Particle>> = vec![vec![]; num_cells_x * num_cells_y];
-        
-        for i in 0..len{
+    
+        // --- Costruisci la griglia ---
+        let mut grid: Vec<Vec<usize>> = vec![Vec::new(); num_cells_x * num_cells_y];
+    
+        for i in 0..len {
             let p = self.points[i];
-            let cell_x = (p.position.x / cell_width).floor() as usize;
-            let cell_y = (p.position.y / cell_height).floor() as usize;
-            let cell_x = cell_x.min(num_cells_x - 1);
-            let cell_y = cell_y.min(num_cells_y - 1);
-
+            let cell_x =
+                ((p.position.x / cell_width).floor() as isize).rem_euclid(num_cells_x as isize) as usize;
+            let cell_y =
+                ((p.position.y / cell_height).floor() as isize).rem_euclid(num_cells_y as isize) as usize;
+    
             let index = cell_y * num_cells_x + cell_x;
-            grid[index].push(p);
+            grid[index].push(i);
         }
-
+    
+        // --- Calcolo forze per cella ---
         for cell_y in 0..num_cells_y {
             for cell_x in 0..num_cells_x {
                 let index = cell_y * num_cells_x + cell_x;
-        
-                for p in &grid[index] {
-                    // iteriamo nelle celle attorno (3x3)
-                    for ny in cell_y.saturating_sub(1)..=(cell_y + 1).min(num_cells_y - 1) {
-                        for nx in cell_x.saturating_sub(1)..=(cell_x + 1).min(num_cells_x - 1) {
+                if grid[index].is_empty() {
+                    continue;
+                }
+    
+                for &p_index in &grid[index] {
+                    let mut sum = Vec2::ZERO;
+    
+                    // celle vicine (3x3 toroidali)
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            let nx =
+                                ((cell_x as isize + dx).rem_euclid(num_cells_x as isize)) as usize;
+                            let ny =
+                                ((cell_y as isize + dy).rem_euclid(num_cells_y as isize)) as usize;
                             let neighbor_index = ny * num_cells_x + nx;
-        
-                            for q in &grid[neighbor_index] {
-                                // Evita di considerare la stessa particella
-                                // (dipende se hai identità per particelle)
-                                // --- DIFFERENZA TOROIDALE ---
-                                let mut dx = p2.position.x - p1.position.x;
-                                let mut dy = p2.position.y - p1.position.y;
-                    
-                                // Avvolgimento toroidale delle distanze
-                                if dx.abs() > width / 2.0 {
-                                    dx -= width * dx.signum();
+    
+                            for &q_index in &grid[neighbor_index] {
+                                if p_index == q_index {
+                                    continue;
                                 }
-                                if dy.abs() > height / 2.0 {
-                                    dy -= height * dy.signum();
-                                }
-                    
+    
+                                let (p1, p2) = (self.points[p_index], self.points[q_index]);
+    
+                                // --- Distanza toroidale continua ---
+                                let dx = ((p2.position.x - p1.position.x + width / 2.0)
+                                    .rem_euclid(width))
+                                    - width / 2.0;
+                                let dy = ((p2.position.y - p1.position.y + height / 2.0)
+                                    .rem_euclid(height))
+                                    - height / 2.0;
+    
                                 let d = Vec2::new(dx, dy);
                                 let dist = d.length().max(0.00001);
-                                if dist > self.radius { continue; }
-                    
-                                let f = Simulation::force(dist / self.radius, self.matrix[p1.color][p2.color]);
+                                if dist > self.radius {
+                                    continue;
+                                }
+    
+                                let f = Simulation::force(
+                                    dist / self.radius,
+                                    self.matrix[p1.color][p2.color],
+                                );
                                 sum += d / dist * f;
                             }
                         }
                     }
+    
+                    // --- Applica forza e movimento ---
                     sum *= self.radius;
     
-                    let p = &mut self.points[i];
-                    p.velocity = 0.5_f32.powf(dt / self.coeff_friction) * p.velocity + sum * dt;
+                    let p = &mut self.points[p_index];
+                    p.velocity =
+                        0.5_f32.powf(dt / self.coeff_friction) * p.velocity + sum * dt;
                     p.position += p.velocity * dt;
-            
-                    // --- WRAP POSIZIONE TOROIDALE ---
-                    if p.position.x < min_x { p.position.x += width; }
-                    if p.position.x > max_x { p.position.x -= width; }
-                    if p.position.y < min_y { p.position.y += height; }
-                    if p.position.y > max_y { p.position.y -= height; }
+    
+                    // --- Wrap toroidale ---
+                    if p.position.x < min_x {
+                        p.position.x += width;
+                    }
+                    if p.position.x > max_x {
+                        p.position.x -= width;
+                    }
+                    if p.position.y < min_y {
+                        p.position.y += height;
+                    }
+                    if p.position.y > max_y {
+                        p.position.y -= height;
+                    }
                 }
             }
-        }*/
-        
-        
-
-        for i in 0..len {
-            let p1 = self.points[i];
-            let mut sum = Vec2::ZERO;
-    
-            for j in 0..len {
-                if i == j { continue; }
-                let p2 = self.points[j];
-    
-                // --- DIFFERENZA TOROIDALE ---
-                let mut dx = p2.position.x - p1.position.x;
-                let mut dy = p2.position.y - p1.position.y;
-    
-                // Avvolgimento toroidale delle distanze
-                if dx.abs() > width / 2.0 {
-                    dx -= width * dx.signum();
-                }
-                if dy.abs() > height / 2.0 {
-                    dy -= height * dy.signum();
-                }
-    
-                let d = Vec2::new(dx, dy);
-                let dist = d.length().max(0.00001);
-                if dist > self.radius { continue; }
-    
-                let f = Simulation::force(dist / self.radius, self.matrix[p1.color][p2.color]);
-                sum += d / dist * f;
-            }
-    
-            sum *= self.radius;
-    
-            let p = &mut self.points[i];
-            p.velocity = 0.5_f32.powf(dt / self.coeff_friction) * p.velocity + sum * dt;
-            p.position += p.velocity * dt;
-    
-            // --- WRAP POSIZIONE TOROIDALE ---
-            if p.position.x < min_x { p.position.x += width; }
-            if p.position.x > max_x { p.position.x -= width; }
-            if p.position.y < min_y { p.position.y += height; }
-            if p.position.y > max_y { p.position.y -= height; }
         }
     }
     
@@ -246,7 +231,7 @@ impl eframe::App for Simulation {
 
                 ui.label("Numero di pallini:");
                 if ui
-                    .add(egui::Slider::new(&mut self.num_points, 10..=2000))
+                    .add(egui::Slider::new(&mut self.num_points, 10..=20000))
                     .changed()
                 {
                     self.generate_points(self.width, self.height);
