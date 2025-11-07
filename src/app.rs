@@ -1,5 +1,6 @@
 use eframe::egui;
 use egui::{Pos2, Vec2};
+use rayon::prelude::*;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -20,7 +21,9 @@ pub struct Simulation {
     width: f32,
     height: f32,
     coeff_friction: f32,
-    zoom: f32
+    zoom: f32,
+    drawing_radius:f32,
+    no_uhd: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -46,12 +49,16 @@ impl Default for Simulation {
             width: 1920.0,
             height: 1080.0,
             coeff_friction: 0.005,
-            zoom: 3.0
+            zoom: 3.0,
+            drawing_radius: 3.0,
+            no_uhd: true,
+
         }
     }
 }
 
 impl Simulation {
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
@@ -91,9 +98,6 @@ impl Simulation {
         let dt = now.duration_since(self.last_time).as_secs_f32();
         self.last_time = now;
     
-        let len = self.num_points;
-    
-        // --- Bordo toroidale ---
         let min_x: f32 = self.width / self.zoom;
         let max_x: f32 = self.width / self.zoom * (self.zoom - 1.0);
         let min_y: f32 = self.height / self.zoom;
@@ -102,114 +106,122 @@ impl Simulation {
         let width = max_x - min_x;
         let height = max_y - min_y;
     
-        // --- Griglia proporzionata al raggio ---
         let num_cells_x = (width / self.radius).ceil() as usize;
         let num_cells_y = (height / self.radius).ceil() as usize;
         let cell_width = width / num_cells_x as f32;
         let cell_height = height / num_cells_y as f32;
     
-        // --- Costruisci la griglia ---
+        // --- snapshot dello stato corrente ---
+        let old_points = self.points.clone();
+    
+        // --- costruiamo la griglia in parallelo ---
+        let cell_indices: Vec<(usize, usize)> = old_points
+            .par_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let cell_x = ((p.position.x / cell_width).floor() as isize)
+                    .rem_euclid(num_cells_x as isize) as usize;
+                let cell_y = ((p.position.y / cell_height).floor() as isize)
+                    .rem_euclid(num_cells_y as isize) as usize;
+                let index = cell_y * num_cells_x + cell_x;
+                (index, i)
+            })
+            .collect();
+    
         let mut grid: Vec<Vec<usize>> = vec![Vec::new(); num_cells_x * num_cells_y];
-    
-        for i in 0..len {
-            let p = self.points[i];
-            let cell_x =
-                ((p.position.x / cell_width).floor() as isize).rem_euclid(num_cells_x as isize) as usize;
-            let cell_y =
-                ((p.position.y / cell_height).floor() as isize).rem_euclid(num_cells_y as isize) as usize;
-    
-            let index = cell_y * num_cells_x + cell_x;
-            grid[index].push(i);
+        for (cell_idx, particle_idx) in cell_indices {
+            grid[cell_idx].push(particle_idx);
         }
     
-        // --- Calcolo forze per cella ---
-        for cell_y in 0..num_cells_y {
-            for cell_x in 0..num_cells_x {
-                let index = cell_y * num_cells_x + cell_x;
-                if grid[index].is_empty() {
-                    continue;
-                }
+        // --- calcolo parallelo delle nuove posizioni/velocità ---
+        let new_points: Vec<_> = old_points
+            .par_iter()
+            .enumerate()
+            .map(|(p_index, p1)| {
+                let cell_x = ((p1.position.x / cell_width).floor() as isize)
+                    .rem_euclid(num_cells_x as isize) as usize;
+                let cell_y = ((p1.position.y / cell_height).floor() as isize)
+                    .rem_euclid(num_cells_y as isize) as usize;
     
-                for &p_index in &grid[index] {
-                    let mut sum = Vec2::ZERO;
+                let mut sum = Vec2::ZERO;
     
-                    // celle vicine (3x3 toroidali)
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
-                            let nx =
-                                ((cell_x as isize + dx).rem_euclid(num_cells_x as isize)) as usize;
-                            let ny =
-                                ((cell_y as isize + dy).rem_euclid(num_cells_y as isize)) as usize;
-                            let neighbor_index = ny * num_cells_x + nx;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let nx = ((cell_x as isize + dx).rem_euclid(num_cells_x as isize)) as usize;
+                        let ny = ((cell_y as isize + dy).rem_euclid(num_cells_y as isize)) as usize;
+                        let neighbor_index = ny * num_cells_x + nx;
     
-                            for &q_index in &grid[neighbor_index] {
-                                if p_index == q_index {
-                                    continue;
-                                }
-    
-                                let (p1, p2) = (self.points[p_index], self.points[q_index]);
-    
-                                // --- Distanza toroidale continua ---
-                                let dx = ((p2.position.x - p1.position.x + width / 2.0)
-                                    .rem_euclid(width))
-                                    - width / 2.0;
-                                let dy = ((p2.position.y - p1.position.y + height / 2.0)
-                                    .rem_euclid(height))
-                                    - height / 2.0;
-    
-                                let d = Vec2::new(dx, dy);
-                                let dist = d.length().max(0.00001);
-                                if dist > self.radius {
-                                    continue;
-                                }
-    
-                                let f = Simulation::force(
-                                    dist / self.radius,
-                                    self.matrix[p1.color][p2.color],
-                                );
-                                sum += d / dist * f;
+                        for &q_index in &grid[neighbor_index] {
+                            if p_index == q_index {
+                                continue;
                             }
+                            let p2 = old_points[q_index];
+    
+                            let dx = ((p2.position.x - p1.position.x + width / 2.0)
+                                .rem_euclid(width))
+                                - width / 2.0;
+                            let dy = ((p2.position.y - p1.position.y + height / 2.0)
+                                .rem_euclid(height))
+                                - height / 2.0;
+    
+                            let d = Vec2::new(dx, dy);
+                            let dist = d.length().max(0.00001);
+                            if dist > self.radius {
+                                continue;
+                            }
+    
+                            let f = Simulation::force(
+                                dist / self.radius,
+                                self.matrix[p1.color][p2.color],
+                            );
+                            sum += d / dist * f;
                         }
                     }
-    
-                    // --- Applica forza e movimento ---
-                    sum *= self.radius;
-    
-                    let p = &mut self.points[p_index];
-                    p.velocity =
-                        0.5_f32.powf(dt / self.coeff_friction) * p.velocity + sum * dt;
-                    p.position += p.velocity * dt;
-    
-                    // --- Wrap toroidale ---
-                    if p.position.x < min_x {
-                        p.position.x += width;
-                    }
-                    if p.position.x > max_x {
-                        p.position.x -= width;
-                    }
-                    if p.position.y < min_y {
-                        p.position.y += height;
-                    }
-                    if p.position.y > max_y {
-                        p.position.y -= height;
-                    }
                 }
-            }
-        }
+    
+                // --- movimento ---
+                let mut new_p = *p1;
+                // Conserva anche l'attrito
+                let damping = 0.5_f32.powf(dt / self.coeff_friction);
+
+                new_p.velocity += sum * self.radius * dt; // applica accelerazione
+                new_p.velocity *= damping;                 // poi smorza
+                new_p.position += new_p.velocity * dt;     // infine aggiorna posizione
+    
+                // --- wrap toroidale ---
+                if new_p.position.x < min_x {
+                    new_p.position.x += width;
+                }
+                if new_p.position.x > max_x {
+                    new_p.position.x -= width;
+                }
+                if new_p.position.y < min_y {
+                    new_p.position.y += height;
+                }
+                if new_p.position.y > max_y {
+                    new_p.position.y -= height;
+                }
+    
+                new_p
+            })
+            .collect();
+    
+        // --- aggiorna lo stato principale ---
+        self.points = new_points;
     }
+    
     
 
-    pub fn force(r: f32, a: f32) -> f32{
+    pub fn force(r: f32, a: f32) -> f32 {
         let beta = 0.3;
-        if r < beta{
-            return r / beta - 1.0;
-        }
-        else if beta < r  && r < 1.0 {
-            return a * (1.0 - (2.0 * r - 1.0 - beta).abs() / (1.0 - beta));
-        }else{
-            return 0.0;
-        }
+        if r >= 1.0 { return 0.0; }
+    
+        let t = (r / beta).min(1.0);
+        let repulsion = - (1.0 - t*t); // forza repulsiva continua
+        let attraction = a * (1.0 - r).powi(2);
+        repulsion + attraction
     }
+    
 }
 
 impl eframe::App for Simulation {
@@ -241,11 +253,13 @@ impl eframe::App for Simulation {
                     self.generate_points(self.width, self.height);
                 }
                 ui.label("Coefficente Attrito:");
-                ui.add(egui::Slider::new(&mut self.coeff_friction, 0.0001..=0.1));
+                ui.add(egui::Slider::new(&mut self.coeff_friction, 0.01..=1.0));
                 ui.label("Zoom:");
-                if ui.add(egui::Slider::new(&mut self.zoom, 3.0..=12.0)).changed() {
+                if ui.add(egui::Slider::new(&mut self.zoom, 3.0..=36.0)).changed() {
                     self.generate_points(self.width, self.height);
                 }
+                ui.label("Drawing Radius:");
+                ui.add(egui::Slider::new(&mut self.drawing_radius, 0.5..=32.0));
                 if ui.button("Rigenera").clicked() {
                     println!("{}, {}", self.width, self.height);
                     self.generate_points(self.width, self.height);
@@ -293,6 +307,7 @@ impl eframe::App for Simulation {
                         }
                     }
                 }
+                ui.add(egui::Checkbox::new(&mut self.no_uhd, "UHD"));
 
                 // FPS
                 let now = std::time::Instant::now();
@@ -329,17 +344,20 @@ impl eframe::App for Simulation {
                 for dx in [-width, 0.0, width] {
                     for dy in [-height, 0.0, height] {
                         let pos = Pos2::new(base.x + dx, base.y + dy);
-                        painter.circle_filled(pos, 3.0, self.colors[p.color]);
+                        painter.circle_filled(pos, self.zoom / self.drawing_radius, self.colors[p.color]);
                     }
                 }
             }
         
-            // Disegna il riquadro di riferimento
-            let stroke = egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE);
-            painter.line_segment([Pos2::new(min_x, 0.0), Pos2::new(min_x, self.height)], stroke);
-            painter.line_segment([Pos2::new(max_x, 0.0), Pos2::new(max_x, self.height)], stroke);
-            painter.line_segment([Pos2::new(0.0, min_y), Pos2::new(self.width, min_y)], stroke);
-            painter.line_segment([Pos2::new(0.0, max_y), Pos2::new(self.width, max_y)], stroke);
+            if self.no_uhd {
+                // Disegna il riquadro di riferimento
+                let stroke = egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE);
+                painter.line_segment([Pos2::new(min_x, 0.0), Pos2::new(min_x, self.height)], stroke);
+                painter.line_segment([Pos2::new(max_x, 0.0), Pos2::new(max_x, self.height)], stroke);
+                painter.line_segment([Pos2::new(0.0, min_y), Pos2::new(self.width, min_y)], stroke);
+                painter.line_segment([Pos2::new(0.0, max_y), Pos2::new(self.width, max_y)], stroke);
+            }
+
         });
         
 
