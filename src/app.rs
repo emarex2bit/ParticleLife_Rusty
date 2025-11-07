@@ -24,6 +24,10 @@ pub struct Simulation {
     zoom: f32,
     drawing_radius:f32,
     no_uhd: bool,
+    #[serde(skip)]
+    camera_offset: Vec2,   // spostamento della vista
+    #[serde(skip)]
+    camera_zoom: f32,      // zoom grafico
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +56,8 @@ impl Default for Simulation {
             zoom: 3.0,
             drawing_radius: 3.0,
             no_uhd: true,
+            camera_offset: Vec2::ZERO,
+            camera_zoom: 1.0,
 
         }
     }
@@ -212,16 +218,16 @@ impl Simulation {
     
     
 
-    pub fn force(r: f32, a: f32) -> f32 {
-        let beta = 0.3;
-        if r >= 1.0 { return 0.0; }
-    
-        let t = (r / beta).min(1.0);
-        let repulsion = - (1.0 - t*t); // forza repulsiva continua
-        let attraction = a * (1.0 - r).powi(2);
-        repulsion + attraction
-    }
-    
+pub fn force(r: f32, a: f32) -> f32 {
+    let beta = 0.3;
+    if r >= 1.0 { return 0.0; }
+
+    let t = (r / beta).min(1.0);
+    let repulsion = - (1.0 - t*t); // forza repulsiva continua
+    let attraction = a * (1.0 - r).powi(2);
+    repulsion + attraction
+}
+
 }
 
 impl eframe::App for Simulation {
@@ -230,7 +236,7 @@ impl eframe::App for Simulation {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Finestra controlli
+        // ======== FINESTRA CONTROLLI ========
         egui::Window::new("Controlli")
             .resizable(true)
             .default_size([200.0, 120.0])
@@ -246,22 +252,25 @@ impl eframe::App for Simulation {
                 {
                     self.generate_points(self.width, self.height);
                 }
+
                 ui.label("Raggio:");
                 ui.add(egui::Slider::new(&mut self.radius, 1.0..=500.0));
+
                 ui.label("Num. Types:");
                 if ui.add(egui::Slider::new(&mut self.num_types, 1..=50)).changed() {
                     self.generate_points(self.width, self.height);
                 }
+
                 ui.label("Coefficente Attrito:");
                 ui.add(egui::Slider::new(&mut self.coeff_friction, 0.01..=1.0));
-                ui.label("Zoom:");
-                if ui.add(egui::Slider::new(&mut self.zoom, 3.0..=36.0)).changed() {
-                    self.generate_points(self.width, self.height);
-                }
-                ui.label("Drawing Radius:");
+
+                ui.label("Zoom simulazione:");
+                ui.add(egui::Slider::new(&mut self.zoom, 3.0..=36.0));
+
+                ui.label("Raggio di disegno:");
                 ui.add(egui::Slider::new(&mut self.drawing_radius, 0.5..=32.0));
+
                 if ui.button("Rigenera").clicked() {
-                    println!("{}, {}", self.width, self.height);
                     self.generate_points(self.width, self.height);
                 }
 
@@ -269,29 +278,25 @@ impl eframe::App for Simulation {
                     ui.label("Genera prima le particelle per creare la matrice.");
                     return;
                 }
-                ui.heading("Matrice Legami");
-                ui.label("Clicca e modifica i valori dei legami tra tipi di particelle:");
-                ui.separator();
 
+                ui.heading("Matrice Legami");
                 egui::Grid::new("matrix_editor_grid")
                     .spacing([8.0, 4.0])
                     .striped(true)
                     .show(ui, |ui| {
-                        // Intestazioni colonne
                         ui.label("");
                         for j in 0..self.num_types {
                             ui.label(format!("T{}", j));
                         }
                         ui.end_row();
 
-                        // Righe
                         for i in 0..self.num_types {
-                            ui.label(format!("T{}", i)); // intestazione riga
+                            ui.label(format!("T{}", i));
                             for j in 0..self.num_types {
                                 ui.add(
                                     egui::DragValue::new(&mut self.matrix[i][j])
                                         .speed(0.01)
-                                        .range(-1.0..=1.0)
+                                        .range(-1.0..=1.0),
                                 );
                             }
                             ui.end_row();
@@ -307,6 +312,7 @@ impl eframe::App for Simulation {
                         }
                     }
                 }
+
                 ui.add(egui::Checkbox::new(&mut self.no_uhd, "UHD"));
 
                 // FPS
@@ -319,15 +325,16 @@ impl eframe::App for Simulation {
                 ui.label(format!("FPS: {:.1}", self.fps));
             });
 
-        // Aggiorna la fisica
-        if  self.points.len() > 0 {
+        // ======== AGGIORNA FISICA ========
+        if !self.points.is_empty() {
             self.update_physics();
         }
 
-        // Disegna le particelle (con replica toroidale)
+        // ======== DISEGNO PARTICELLE + CAMERA ========
         egui::CentralPanel::default().show(ctx, |ui| {
             let painter = ui.painter();
-        
+
+            // Limiti toroidali del mondo
             let min_x = self.width / self.zoom;
             let max_x = self.width / self.zoom * (self.zoom - 1.0);
             let min_y = self.height / self.zoom;
@@ -335,34 +342,79 @@ impl eframe::App for Simulation {
             let width = max_x - min_x;
             let height = max_y - min_y;
 
-            
-        
+            // --- Input mouse per camera ---
+            let response = ui.interact(ui.max_rect(), ui.id().with("canvas"), egui::Sense::drag());
+
+            // Rotellina → zoom (verso puntatore)
+            if response.hovered() {
+                let scroll_delta = ctx.input(|i| i.smooth_scroll_delta.y);
+                if scroll_delta.abs() > 0.0 {
+                    let zoom_factor = 1.1_f32.powf(scroll_delta / 100.0);
+                    let mouse_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(Pos2::new(0.0, 0.0));
+
+                    // Coordinate mondo prima dello zoom
+                    let before = (mouse_pos.to_vec2() / self.camera_zoom) - self.camera_offset;
+
+                    self.camera_zoom *= zoom_factor;
+                    self.camera_zoom = self.camera_zoom.clamp(0.1, 10.0);
+
+                    // Mantieni punto sotto il mouse fisso
+                    let after = (mouse_pos.to_vec2() / self.camera_zoom) - self.camera_offset;
+                    self.camera_offset += after - before;
+                }
+            }
+
+            // Drag → panning
+            if response.dragged() {
+                let delta = response.drag_delta();
+                self.camera_offset += delta / self.camera_zoom;
+            }
+
+            // Helper: world → schermo
+            let to_screen = |p: Pos2| {
+                Pos2::new(
+                    (p.x + self.camera_offset.x) * self.camera_zoom,
+                    (p.y + self.camera_offset.y) * self.camera_zoom,
+                )
+            };
+
+            // Disegno particelle (con replica toroidale)
             for p in &self.points {
-                let base = p.position;
-        
-                // Genera tutte le 9 posizioni toroidali (centro + 8 repliche)
                 for dx in [-width, 0.0, width] {
                     for dy in [-height, 0.0, height] {
-                        let pos = Pos2::new(base.x + dx, base.y + dy);
-                        painter.circle_filled(pos, self.zoom / self.drawing_radius, self.colors[p.color]);
+                        let pos = to_screen(Pos2::new(p.position.x + dx, p.position.y + dy));
+                        painter.circle_filled(
+                            pos,
+                            (self.zoom / self.drawing_radius) * self.camera_zoom,
+                            self.colors[p.color],
+                        );
                     }
                 }
             }
-        
+
+            // Cornice area utile
             if self.no_uhd {
-                // Disegna il riquadro di riferimento
                 let stroke = egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE);
-                painter.line_segment([Pos2::new(min_x, 0.0), Pos2::new(min_x, self.height)], stroke);
-                painter.line_segment([Pos2::new(max_x, 0.0), Pos2::new(max_x, self.height)], stroke);
-                painter.line_segment([Pos2::new(0.0, min_y), Pos2::new(self.width, min_y)], stroke);
-                painter.line_segment([Pos2::new(0.0, max_y), Pos2::new(self.width, max_y)], stroke);
+                painter.line_segment(
+                    [to_screen(Pos2::new(min_x, 0.0)), to_screen(Pos2::new(min_x, self.height))],
+                    stroke,
+                );
+                painter.line_segment(
+                    [to_screen(Pos2::new(max_x, 0.0)), to_screen(Pos2::new(max_x, self.height))],
+                    stroke,
+                );
+                painter.line_segment(
+                    [to_screen(Pos2::new(0.0, min_y)), to_screen(Pos2::new(self.width, min_y))],
+                    stroke,
+                );
+                painter.line_segment(
+                    [to_screen(Pos2::new(0.0, max_y)), to_screen(Pos2::new(self.width, max_y))],
+                    stroke,
+                );
             }
-
         });
-        
 
-
-        // Richiedi un nuovo frame continuo
+        // Richiedi nuovo frame
         ctx.request_repaint();
     }
 }
